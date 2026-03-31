@@ -1,8 +1,10 @@
 import type {
   AgentCanvasApi,
   CreateDependencyEdgeInput,
+  CreateMessageEdgeInput,
   CreateRunnerFromCheckpointInput,
   CreateRunnerInput,
+  DispatchTextNodeInput,
   MarkRunnerCompleteInput,
   ResetAllWorkflowsInput,
   ResetWorkflowFromRunnerInput,
@@ -12,6 +14,7 @@ import type {
   RunnerUpdatedEvent,
   SealRunnerCheckpointInput,
   UpdatePanelGeometryInput,
+  UpdateTextNodeInput,
   WorkspaceSnapshot
 } from "@shared/ipc";
 
@@ -97,6 +100,13 @@ class BrowserAgentCanvasApi implements AgentCanvasApi {
 
   async createDependencyEdge(input: CreateDependencyEdgeInput): Promise<WorkspaceSnapshot> {
     return requestJson<WorkspaceSnapshot>(`${API_BASE}/api/workflows/edges`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async createMessageEdge(input: CreateMessageEdgeInput): Promise<WorkspaceSnapshot> {
+    return requestJson<WorkspaceSnapshot>(`${API_BASE}/api/message-edges`, {
       method: "POST",
       body: JSON.stringify(input)
     });
@@ -190,6 +200,20 @@ class BrowserAgentCanvasApi implements AgentCanvasApi {
     return requestJson<WorkspaceSnapshot>(`${API_BASE}/api/helpers`, {
       method: "POST",
       body: JSON.stringify(input)
+    });
+  }
+
+  async updateTextNode(input: UpdateTextNodeInput): Promise<WorkspaceSnapshot> {
+    return requestJson<WorkspaceSnapshot>(`${API_BASE}/api/text-nodes/${input.runnerId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async dispatchTextNode(input: DispatchTextNodeInput): Promise<WorkspaceSnapshot> {
+    return requestJson<WorkspaceSnapshot>(`${API_BASE}/api/text-nodes/${input.runnerId}/dispatch`, {
+      method: "POST",
+      body: JSON.stringify({})
     });
   }
 

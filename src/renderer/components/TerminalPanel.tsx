@@ -223,8 +223,6 @@ export function TerminalPanel({
   panel,
   canSeal,
   sealing,
-  linking,
-  canConnectTarget,
   canResetWorkflow,
   viewportScale,
   renderMode,
@@ -237,8 +235,6 @@ export function TerminalPanel({
   onToggleMinimize,
   onRestoreWindow,
   onToggleMaximize,
-  onBeginLink,
-  onConnectTarget,
   onMarkComplete,
   onResetWorkflow,
   onHibernate,
@@ -632,15 +628,6 @@ export function TerminalPanel({
               Reset
             </button>
           ) : null}
-          {canConnectTarget ? (
-            <button className="ghost-button compact-button terminal-action-button" onClick={onConnectTarget} title="Connect the linking source to this runner">
-              Connect
-            </button>
-          ) : (
-            <button className="ghost-button compact-button terminal-action-button" onClick={onBeginLink} title="Start linking from this runner">
-              {linking ? "Linking…" : "Link"}
-            </button>
-          )}
           <button className="ghost-button compact-button terminal-action-button" disabled={!canSeal || sealing} onClick={onSeal} title="Seal this runner into a checkpoint">
             {panel.runner.sealedNodeId ? "Sealed" : sealing ? "Sealing…" : "Seal"}
           </button>

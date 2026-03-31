@@ -8,8 +8,10 @@ import type {
   CreateAgentProfileInput,
   CreateDependencyEdgeInput,
   CreateHelperNodeInput,
+  CreateMessageEdgeInput,
   CreateRunnerFromCheckpointInput,
   CreateRunnerInput,
+  DispatchTextNodeInput,
   MarkRunnerCompleteInput,
   ResetAllWorkflowsInput,
   ResetWorkflowFromRunnerInput,
@@ -18,7 +20,8 @@ import type {
   RunnerResizeInput,
   RunnerUpdatedEvent,
   UpdateAgentProfileInput,
-  UpdatePanelGeometryInput
+  UpdatePanelGeometryInput,
+  UpdateTextNodeInput
 } from "@shared/ipc";
 
 import { AgentCanvasRuntime } from "../main/services/agent-canvas-runtime";
@@ -252,6 +255,12 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/message-edges") {
+      const body = await readJsonBody<CreateMessageEdgeInput>(request);
+      sendJson(response, 200, runtime.createMessageEdge(body));
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/workflows/complete") {
       const body = await readJsonBody<MarkRunnerCompleteInput>(request);
       sendJson(response, 200, runtime.markRunnerComplete(body));
@@ -294,6 +303,25 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/helpers") {
       const body = await readJsonBody<CreateHelperNodeInput>(request);
       sendJson(response, 200, runtime.createHelperNode(body));
+      return;
+    }
+
+    const textNodeMatch = url.pathname.match(/^\/api\/text-nodes\/([^/]+)$/);
+    if (request.method === "PATCH" && textNodeMatch) {
+      const body = await readJsonBody<UpdateTextNodeInput>(request);
+      sendJson(response, 200, runtime.updateTextNode({
+        ...body,
+        runnerId: decodeURIComponent(textNodeMatch[1])
+      }));
+      return;
+    }
+
+    const textNodeDispatchMatch = request.method === "POST" ? url.pathname.match(/^\/api\/text-nodes\/([^/]+)\/dispatch$/) : null;
+    if (textNodeDispatchMatch) {
+      await readJsonBody<DispatchTextNodeInput>(request);
+      sendJson(response, 200, runtime.dispatchTextNode({
+        runnerId: decodeURIComponent(textNodeDispatchMatch[1])
+      }));
       return;
     }
 

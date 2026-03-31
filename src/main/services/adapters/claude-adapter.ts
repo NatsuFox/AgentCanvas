@@ -1,10 +1,19 @@
 import { execFileSync } from "node:child_process";
 
-import type { AgentAdapter, AdapterLaunchPlan, ForkInput, ResumeInput, StartFreshInput } from "./agent-adapter";
+import {
+  buildShellWrappedCommand,
+  buildShellWrappedProbe,
+  type AgentAdapter,
+  type AdapterLaunchPlan,
+  type ForkInput,
+  type ResumeInput,
+  type StartFreshInput
+} from "./agent-adapter";
 
 function readVersion(binary: string): string | null {
   try {
-    return execFileSync(binary, ["--version"], {
+    const probe = buildShellWrappedProbe(binary, ["--version"]);
+    return execFileSync(probe.executable, probe.args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
@@ -38,35 +47,40 @@ export class ClaudeAdapter implements AgentAdapter {
 
   startFresh(input: StartFreshInput): AdapterLaunchPlan {
     const args = input.prompt ? [input.prompt] : [];
+    const wrapped = buildShellWrappedCommand("claude", args);
 
     return {
       kind: this.kind,
       title: "Claude Code",
-      executable: "claude",
-      args,
-      shell: null,
+      executable: wrapped.executable,
+      args: wrapped.args,
+      shell: wrapped.shell,
       provenance: "fresh_session"
     };
   }
 
   resume(input: ResumeInput): AdapterLaunchPlan {
+    const wrapped = buildShellWrappedCommand("claude", ["--resume", input.sessionId]);
+
     return {
       kind: this.kind,
       title: "Claude Code",
-      executable: "claude",
-      args: ["--resume", input.sessionId],
-      shell: null,
+      executable: wrapped.executable,
+      args: wrapped.args,
+      shell: wrapped.shell,
       provenance: "native_resume"
     };
   }
 
   fork(input: ForkInput): AdapterLaunchPlan {
+    const wrapped = buildShellWrappedCommand("claude", ["--resume", input.sessionId, "--fork-session"]);
+
     return {
       kind: this.kind,
       title: "Claude Code",
-      executable: "claude",
-      args: ["--resume", input.sessionId, "--fork-session"],
-      shell: null,
+      executable: wrapped.executable,
+      args: wrapped.args,
+      shell: wrapped.shell,
       provenance: "native_fork"
     };
   }

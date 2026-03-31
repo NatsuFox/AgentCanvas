@@ -1,6 +1,19 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import { IPC_CHANNELS, type AgentCanvasApi, type ApproveGateInput, type CreateAgentProfileInput, type CreateHelperNodeInput, type RunnerExitEvent, type RunnerOutputEvent, type RunnerUpdatedEvent, type UpdateAgentProfileInput } from "@shared/ipc";
+import {
+  IPC_CHANNELS,
+  type AgentCanvasApi,
+  type ApproveGateInput,
+  type CreateAgentProfileInput,
+  type CreateHelperNodeInput,
+  type CreateMessageEdgeInput,
+  type DispatchTextNodeInput,
+  type RunnerExitEvent,
+  type RunnerOutputEvent,
+  type RunnerUpdatedEvent,
+  type UpdateAgentProfileInput,
+  type UpdateTextNodeInput
+} from "@shared/ipc";
 
 const api: AgentCanvasApi = {
   getWorkspaceState: () => ipcRenderer.invoke(IPC_CHANNELS.workspaceGetState),
@@ -9,6 +22,7 @@ const api: AgentCanvasApi = {
   sealRunnerCheckpoint: (input) => ipcRenderer.invoke(IPC_CHANNELS.runnerSealCheckpoint, input),
   updatePanelGeometry: (input) => ipcRenderer.invoke(IPC_CHANNELS.panelUpdateGeometry, input),
   createDependencyEdge: (input) => ipcRenderer.invoke(IPC_CHANNELS.workflowCreateEdge, input),
+  createMessageEdge: (input: CreateMessageEdgeInput) => ipcRenderer.invoke(IPC_CHANNELS.messageEdgeCreate, input),
   markRunnerComplete: (input) => ipcRenderer.invoke(IPC_CHANNELS.workflowMarkComplete, input),
   resetAllWorkflows: (input) => ipcRenderer.invoke(IPC_CHANNELS.workflowResetAll, input),
   resetWorkflowFromRunner: (input) => ipcRenderer.invoke(IPC_CHANNELS.workflowResetFromRunner, input),
@@ -22,6 +36,8 @@ const api: AgentCanvasApi = {
   updateAgentProfile: (input: UpdateAgentProfileInput) => ipcRenderer.invoke(IPC_CHANNELS.profileUpdate, input),
   deleteAgentProfile: (profileId: string) => ipcRenderer.invoke(IPC_CHANNELS.profileDelete, profileId),
   createHelperNode: (input: CreateHelperNodeInput) => ipcRenderer.invoke(IPC_CHANNELS.helperNodeCreate, input),
+  updateTextNode: (input: UpdateTextNodeInput) => ipcRenderer.invoke(IPC_CHANNELS.textNodeUpdate, input),
+  dispatchTextNode: (input: DispatchTextNodeInput) => ipcRenderer.invoke(IPC_CHANNELS.textNodeDispatch, input),
   approveGate: (input: ApproveGateInput) => ipcRenderer.invoke(IPC_CHANNELS.gateApprove, input),
   onRunnerOutput: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, payload: RunnerOutputEvent) => {

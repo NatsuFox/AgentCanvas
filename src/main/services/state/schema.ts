@@ -101,6 +101,23 @@ create table if not exists dependency_edges (
   created_at text not null
 );
 
+create table if not exists message_edges (
+  id text primary key,
+  source_runner_id text not null references runners(id),
+  target_runner_id text not null references runners(id),
+  created_at text not null
+);
+
+create table if not exists message_queue (
+  id text primary key,
+  source_runner_id text not null references runners(id),
+  target_runner_id text not null references runners(id),
+  payload_text text not null,
+  status text not null check (status in ('pending','delivered')) default 'pending',
+  created_at text not null,
+  delivered_at text
+);
+
 create table if not exists runner_workflow_state (
   runner_id text not null references runners(id),
   workflow_id text not null references workflows(id),
@@ -177,7 +194,7 @@ create table if not exists signal_ledger (
 
 create table if not exists helper_node_configs (
   runner_id text primary key references runners(id),
-  helper_kind text not null check (helper_kind in ('signal_router','approval_gate','artifact_watcher','review_diff','browser_preview')),
+  helper_kind text not null check (helper_kind in ('text_node','signal_router','approval_gate','artifact_watcher','review_diff','browser_preview')),
   config_json text not null default '{}',
   gate_approved integer not null default 0,
   gate_approved_at text

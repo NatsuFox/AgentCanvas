@@ -8,16 +8,19 @@ import {
   type CreateAgentProfileInput,
   type CreateDependencyEdgeInput,
   type CreateHelperNodeInput,
-  IPC_CHANNELS,
+  type CreateMessageEdgeInput,
   type CreateRunnerFromCheckpointInput,
   type CreateRunnerInput,
+  type DispatchTextNodeInput,
+  IPC_CHANNELS,
   type MarkRunnerCompleteInput,
   type ResetAllWorkflowsInput,
   type ResetWorkflowFromRunnerInput,
   type RunnerResizeInput,
   type RunnerWriteInput,
   type UpdateAgentProfileInput,
-  type UpdatePanelGeometryInput
+  type UpdatePanelGeometryInput,
+  type UpdateTextNodeInput
 } from "@shared/ipc";
 
 import { AgentCanvasRuntime } from "./services/agent-canvas-runtime";
@@ -90,6 +93,10 @@ function registerIpcHandlers(): void {
     return runtime.createDependencyEdge(input);
   });
 
+  ipcMain.handle(IPC_CHANNELS.messageEdgeCreate, (_event, input: CreateMessageEdgeInput) => {
+    return runtime.createMessageEdge(input);
+  });
+
   ipcMain.handle(IPC_CHANNELS.workflowMarkComplete, (_event, input: MarkRunnerCompleteInput) => {
     return runtime.markRunnerComplete(input);
   });
@@ -136,6 +143,14 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.helperNodeCreate, (_event, input: CreateHelperNodeInput) => {
     return runtime.createHelperNode(input);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.textNodeUpdate, (_event, input: UpdateTextNodeInput) => {
+    return runtime.updateTextNode(input);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.textNodeDispatch, (_event, input: DispatchTextNodeInput) => {
+    return runtime.dispatchTextNode(input);
   });
 
   ipcMain.handle(IPC_CHANNELS.gateApprove, (_event, input: ApproveGateInput) => {

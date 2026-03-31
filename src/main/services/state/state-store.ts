@@ -11,16 +11,19 @@ import type {
   CheckpointRecord,
   CreateAgentProfileInput,
   CreateHelperNodeInput,
-  DependencyEdgeRecord,
   CreateRunnerInput,
+  DependencyEdgeRecord,
   HelperNodeKind,
   HelperNodeRecord,
+  MessageEdgeRecord,
   RunnerRecord,
   SessionProvenance,
   SignalLedgerEntry,
   SignalSourceKind,
+  TextNodeConfig,
   UpdateAgentProfileInput,
   UpdatePanelGeometryInput,
+  UpdateTextNodeInput,
   WorkflowCondition,
   WorkflowRunRecord,
   WorkflowSummaryRecord,
@@ -83,6 +86,24 @@ interface DependencyEdgeRow {
   signal_config: string | null;
   condition: WorkflowCondition;
   created_at: string;
+}
+
+interface MessageEdgeRow {
+  id: string;
+  source_runner_id: string;
+  target_runner_id: string;
+  pending_count: number;
+  created_at: string;
+}
+
+interface MessageQueueRow {
+  id: string;
+  source_runner_id: string;
+  target_runner_id: string;
+  payload_text: string;
+  status: "pending" | "delivered";
+  created_at: string;
+  delivered_at: string | null;
 }
 
 interface WorkflowSummaryRow {
@@ -224,6 +245,25 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function defaultTextNodeConfig(): TextNodeConfig {
+  return {
+    textValue: "",
+    clearAfterSend: false,
+    autoRelayIncoming: true
+  };
+}
+
+function normalizeTextNodeConfig(configJson: Record<string, unknown> | null | undefined): TextNodeConfig {
+  const defaults = defaultTextNodeConfig();
+
+  return {
+    textValue: typeof configJson?.textValue === "string" ? configJson.textValue : defaults.textValue,
+    clearAfterSend: typeof configJson?.clearAfterSend === "boolean" ? configJson.clearAfterSend : defaults.clearAfterSend,
+    autoRelayIncoming:
+      typeof configJson?.autoRelayIncoming === "boolean" ? configJson.autoRelayIncoming : defaults.autoRelayIncoming
+  };
+}
+
 function toRunnerRecord(row: RunnerRow): RunnerRecord {
   return {
     id: row.id,
@@ -297,6 +337,16 @@ function toDependencyEdgeRecord(row: DependencyEdgeRow): DependencyEdgeRecord {
   };
 }
 
+function toMessageEdgeRecord(row: MessageEdgeRow): MessageEdgeRecord {
+  return {
+    id: row.id,
+    sourceRunnerId: row.source_runner_id,
+    targetRunnerId: row.target_runner_id,
+    pendingCount: row.pending_count,
+    createdAt: row.created_at
+  };
+}
+
 function toWorkflowSummaryRecord(row: WorkflowSummaryRow): WorkflowSummaryRecord {
   return {
     id: row.id,
@@ -339,6 +389,7 @@ export class StateStore {
     this.database.exec("pragma journal_mode = WAL;");
     this.database.exec(INITIAL_SCHEMA_SQL);
     this.ensureRunnerColumns();
+    this.ensureHelperNodeConfigSchema();
     this.ensureDefaultWorkspaceView();
     this.markRunningSessionsExited();
     this.migrateWorkspaceResources();
@@ -457,6 +508,26 @@ export class StateStore {
       )
       .all() as unknown as DependencyEdgeRow[];
 
+    const messageEdgeRows = this.database
+      .prepare(
+        `
+          select
+            me.id,
+            me.source_runner_id,
+            me.target_runner_id,
+            count(mq.id) as pending_count,
+            me.created_at
+          from message_edges me
+          left join message_queue mq
+            on mq.source_runner_id = me.source_runner_id
+           and mq.target_runner_id = me.target_runner_id
+           and mq.status = 'pending'
+          group by me.id
+          order by me.created_at asc
+        `
+      )
+      .all() as unknown as MessageEdgeRow[];
+
     const workflowRows = this.database
       .prepare(
         `
@@ -544,6 +615,7 @@ export class StateStore {
       panels,
       checkpoints: checkpointRows.map(toCheckpointRecord),
       dependencyEdges: dependencyRows.map(toDependencyEdgeRecord),
+      messageEdges: messageEdgeRows.map(toMessageEdgeRecord),
       workflows: workflowRows.map(toWorkflowSummaryRecord),
       workflowRuns: workflowRunRows.map(toWorkflowRunRecord),
       signalLedger: signalLedgerRows.map((row) => ({
@@ -706,6 +778,8 @@ export class StateStore {
 
     this.inTransaction(() => {
       this.database.prepare(`delete from dependency_edges where source_runner_id = ? or target_runner_id = ?`).run(runnerId, runnerId);
+      this.database.prepare(`delete from message_edges where source_runner_id = ? or target_runner_id = ?`).run(runnerId, runnerId);
+      this.database.prepare(`delete from message_queue where source_runner_id = ? or target_runner_id = ?`).run(runnerId, runnerId);
       this.database.prepare(`delete from runner_workflow_state where runner_id = ?`).run(runnerId);
       this.database.prepare(`delete from workflow_memberships where runner_id = ?`).run(runnerId);
       this.database.prepare(`delete from signal_ledger where runner_id = ?`).run(runnerId);
@@ -1352,6 +1426,14 @@ export class StateStore {
   }
 
   private wouldCreateCycle(edges: DependencyEdgeRecord[], sourceRunnerId: string, targetRunnerId: string): boolean {
+    return this.wouldCreateRunnerCycle(edges, sourceRunnerId, targetRunnerId);
+  }
+
+  private wouldCreateRunnerCycle(
+    edges: Array<{ sourceRunnerId: string; targetRunnerId: string }>,
+    sourceRunnerId: string,
+    targetRunnerId: string
+  ): boolean {
     const adjacency = new Map<string, string[]>();
 
     for (const edge of edges) {
@@ -1643,6 +1725,35 @@ export class StateStore {
     this.ensureColumn("nodes", "session_file", "alter table nodes add column session_file text");
   }
 
+  private ensureHelperNodeConfigSchema(): void {
+    const row = this.database
+      .prepare(`select sql from sqlite_master where type = 'table' and name = 'helper_node_configs' limit 1`)
+      .get() as { sql: string | null } | undefined;
+
+    if (!row?.sql || row.sql.includes("text_node")) {
+      return;
+    }
+
+    this.inTransaction(() => {
+      this.database.exec(`alter table helper_node_configs rename to helper_node_configs_legacy`);
+      this.database.exec(`
+        create table helper_node_configs (
+          runner_id text primary key references runners(id),
+          helper_kind text not null check (helper_kind in ('text_node','signal_router','approval_gate','artifact_watcher','review_diff','browser_preview')),
+          config_json text not null default '{}',
+          gate_approved integer not null default 0,
+          gate_approved_at text
+        )
+      `);
+      this.database.exec(`
+        insert into helper_node_configs (runner_id, helper_kind, config_json, gate_approved, gate_approved_at)
+        select runner_id, helper_kind, config_json, gate_approved, gate_approved_at
+        from helper_node_configs_legacy
+      `);
+      this.database.exec(`drop table helper_node_configs_legacy`);
+    });
+  }
+
   private ensureColumn(tableName: string, columnName: string, sql: string): void {
     const columns = this.database.prepare(`pragma table_info(${tableName})`).all() as Array<{ name: string }>;
 
@@ -1812,16 +1923,161 @@ export class StateStore {
   }
 
   createHelperNode(input: CreateHelperNodeInput, panelSpec: Omit<RunnerPanelSpec, "agentKind">): RunnerPanelArtifacts {
+    const helperTitle = input.helperKind === "text_node" ? "Text" : input.helperKind;
+    const defaultConfig =
+      input.helperKind === "text_node"
+        ? { ...defaultTextNodeConfig(), ...(input.configJson ?? {}) }
+        : (input.configJson ?? {});
     const artifacts = this.createRunnerPanel({
       ...panelSpec,
       agentKind: "helper",
-      title: input.helperKind
+      title: helperTitle,
+      width: panelSpec.width ?? (input.helperKind === "text_node" ? 380 : 280),
+      height: panelSpec.height ?? (input.helperKind === "text_node" ? 260 : 190)
     });
     this.database.prepare(
       `insert into helper_node_configs (runner_id, helper_kind, config_json, gate_approved, gate_approved_at)
        values (?, ?, ?, 0, null)`
-    ).run(artifacts.runner.id, input.helperKind, JSON.stringify(input.configJson ?? {}));
+    ).run(artifacts.runner.id, input.helperKind, JSON.stringify(defaultConfig));
     return artifacts;
+  }
+
+  createMessageEdge(sourceRunnerId: string, targetRunnerId: string): void {
+    if (sourceRunnerId === targetRunnerId) {
+      throw new Error("A node cannot send messages to itself.");
+    }
+
+    if (!this.isMessageConnectableRunner(sourceRunnerId) || !this.isMessageConnectableRunner(targetRunnerId)) {
+      throw new Error("Only terminal and Text nodes support message edges in this tranche.");
+    }
+
+    const existingInbound = this.database
+      .prepare(`select source_runner_id from message_edges where target_runner_id = ? limit 1`)
+      .get(targetRunnerId) as { source_runner_id: string } | undefined;
+
+    if (existingInbound) {
+      throw new Error("This target already has an upstream message edge.");
+    }
+
+    const edges = this.getMessageEdges();
+    if (this.wouldCreateRunnerCycle(edges, sourceRunnerId, targetRunnerId)) {
+      throw new Error("This message edge would create a cycle, so it has been rejected.");
+    }
+
+    this.database
+      .prepare(`insert into message_edges (id, source_runner_id, target_runner_id, created_at) values (?, ?, ?, ?)`)
+      .run(randomUUID(), sourceRunnerId, targetRunnerId, now());
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): TextNodeConfig {
+    const helper = this.getHelperNodeConfig(input.runnerId);
+    if (!helper || helper.helperKind !== "text_node") {
+      throw new Error(`Text node ${input.runnerId} was not found.`);
+    }
+
+    const current = normalizeTextNodeConfig(helper.configJson);
+    const next: TextNodeConfig = {
+      textValue: input.textValue ?? current.textValue,
+      clearAfterSend: input.clearAfterSend ?? current.clearAfterSend,
+      autoRelayIncoming: input.autoRelayIncoming ?? current.autoRelayIncoming
+    };
+
+    this.database
+      .prepare(`update helper_node_configs set config_json = ? where runner_id = ? and helper_kind = 'text_node'`)
+      .run(JSON.stringify(next), input.runnerId);
+
+    return next;
+  }
+
+  getTextNodeConfig(runnerId: string): TextNodeConfig | null {
+    const helper = this.getHelperNodeConfig(runnerId);
+    if (!helper || helper.helperKind !== "text_node") {
+      return null;
+    }
+
+    return normalizeTextNodeConfig(helper.configJson);
+  }
+
+  getMessageEdges(): MessageEdgeRecord[] {
+    const rows = this.database
+      .prepare(
+        `
+          select
+            me.id,
+            me.source_runner_id,
+            me.target_runner_id,
+            count(mq.id) as pending_count,
+            me.created_at
+          from message_edges me
+          left join message_queue mq
+            on mq.source_runner_id = me.source_runner_id
+           and mq.target_runner_id = me.target_runner_id
+           and mq.status = 'pending'
+          group by me.id
+          order by me.created_at asc
+        `
+      )
+      .all() as unknown as MessageEdgeRow[];
+
+    return rows.map(toMessageEdgeRecord);
+  }
+
+  getOutboundMessageEdges(sourceRunnerId: string): MessageEdgeRecord[] {
+    return this.getMessageEdges().filter((edge) => edge.sourceRunnerId === sourceRunnerId);
+  }
+
+  enqueueMessage(sourceRunnerId: string, targetRunnerId: string, payloadText: string): string {
+    const id = randomUUID();
+    this.database
+      .prepare(
+        `insert into message_queue (id, source_runner_id, target_runner_id, payload_text, status, created_at, delivered_at)
+         values (?, ?, ?, ?, 'pending', ?, null)`
+      )
+      .run(id, sourceRunnerId, targetRunnerId, payloadText, now());
+    return id;
+  }
+
+  peekNextPendingMessage(targetRunnerId: string): MessageQueueRow | null {
+    const row = this.database
+      .prepare(
+        `
+          select id, source_runner_id, target_runner_id, payload_text, status, created_at, delivered_at
+          from message_queue
+          where target_runner_id = ? and status = 'pending'
+          order by created_at asc
+          limit 1
+        `
+      )
+      .get(targetRunnerId) as MessageQueueRow | undefined;
+
+    return row ?? null;
+  }
+
+  markMessageDelivered(messageId: string): void {
+    this.database
+      .prepare(`update message_queue set status = 'delivered', delivered_at = ? where id = ?`)
+      .run(now(), messageId);
+  }
+
+  getPendingMessageCount(targetRunnerId: string): number {
+    const row = this.database
+      .prepare(`select count(*) as count from message_queue where target_runner_id = ? and status = 'pending'`)
+      .get(targetRunnerId) as { count: number };
+    return row.count;
+  }
+
+  private isMessageConnectableRunner(runnerId: string): boolean {
+    const runner = this.getRunner(runnerId);
+    if (!runner) {
+      return false;
+    }
+
+    if (runner.agentKind !== "helper") {
+      return true;
+    }
+
+    const helper = this.getHelperNodeConfig(runnerId);
+    return helper?.helperKind === "text_node";
   }
 
   approveGate(input: ApproveGateInput): void {
@@ -1845,10 +2101,15 @@ export class StateStore {
   }
 
   private toHelperNodeRecord(row: HelperNodeConfigRow): HelperNodeRecord {
+    const parsedConfig = JSON.parse(row.config_json) as Record<string, unknown>;
+
     return {
       runnerId: row.runner_id,
       helperKind: row.helper_kind,
-      configJson: JSON.parse(row.config_json) as Record<string, unknown>,
+      configJson:
+        row.helper_kind === "text_node"
+          ? (normalizeTextNodeConfig(parsedConfig) as unknown as Record<string, unknown>)
+          : parsedConfig,
       gateApproved: row.gate_approved === 1,
       gateApprovedAt: row.gate_approved_at
     };

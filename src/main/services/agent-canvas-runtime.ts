@@ -6,14 +6,17 @@ import type {
   BranchMode,
   CreateDependencyEdgeInput,
   CreateHelperNodeInput,
+  CreateMessageEdgeInput,
   CreateRunnerFromCheckpointInput,
   CreateRunnerInput,
+  DispatchTextNodeInput,
   MarkRunnerCompleteInput,
   ResetWorkflowFromRunnerInput,
   RunnerExitEvent,
-  UpdatePanelGeometryInput,
   RunnerOutputEvent,
   RunnerUpdatedEvent,
+  UpdatePanelGeometryInput,
+  UpdateTextNodeInput,
   WorkspaceSnapshot
 } from "@shared/ipc";
 
@@ -32,6 +35,18 @@ interface RuntimeEventSink {
 
 function lifecycleBanner(message: string): string {
   return `\r\n[AgentCanvas] ${message}\r\n`;
+}
+
+function sanitizeTerminalText(data: string): string {
+  return data
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\u0007/g, "")
+    .replace(/\r/g, "");
+}
+
+function looksLikePrompt(data: string): boolean {
+  return /(?:^|\n)[^\n]*[$>%❯›ϟ]\s*$/.test(sanitizeTerminalText(data));
 }
 
 export class AgentCanvasRuntime {
@@ -53,10 +68,9 @@ export class AgentCanvasRuntime {
   private readonly hasEmittedOutput = new Set<string>();
   private readonly artifactWatchers = new Map<string, FSWatcher>();
   private readonly approvedGates = new Set<string>();
-
-  // Matches bare shell/agent prompts at end of a trimmed line.
-  // Used for heuristic turn_complete detection.
-  private static readonly PROMPT_SENTINEL = /[\$>%❯]\s*$/m;
+  private readonly readyForQueuedInput = new Set<string>();
+  private readonly captureTurnOutput = new Set<string>();
+  private readonly turnOutputBuffers = new Map<string, string>();
 
   private isShuttingDown = false;
 
@@ -97,6 +111,9 @@ export class AgentCanvasRuntime {
     }
     this.artifactWatchers.clear();
     this.approvedGates.clear();
+    this.readyForQueuedInput.clear();
+    this.captureTurnOutput.clear();
+    this.turnOutputBuffers.clear();
     this.ptySupervisor.shutdownAll();
     this.stateStore.markAllLiveRunnersExited();
     this.stateStore.shutdown();
@@ -279,6 +296,10 @@ export class AgentCanvasRuntime {
   writeToRunner(runnerId: string, data: string): void {
     this.ptySupervisor.write(runnerId, data);
     this.stateStore.handleRunnerInputSent(runnerId);
+
+    if (data.includes("\r") || data.includes("\n")) {
+      this.startCapturingTurnOutput(runnerId);
+    }
   }
 
   resizeRunner(runnerId: string, cols: number, rows: number): void {
@@ -339,6 +360,38 @@ export class AgentCanvasRuntime {
     return this.getWorkspaceState();
   }
 
+  createMessageEdge(input: CreateMessageEdgeInput): WorkspaceSnapshot {
+    this.stateStore.createMessageEdge(input.sourceRunnerId, input.targetRunnerId);
+    return this.getWorkspaceState();
+  }
+
+  updateTextNode(input: UpdateTextNodeInput): WorkspaceSnapshot {
+    this.stateStore.updateTextNode(input);
+    this.emitWorkspaceRefresh(input.runnerId);
+    return this.getWorkspaceState();
+  }
+
+  dispatchTextNode(input: DispatchTextNodeInput): WorkspaceSnapshot {
+    const config = this.stateStore.getTextNodeConfig(input.runnerId);
+    if (!config) {
+      throw new Error(`Text node ${input.runnerId} was not found.`);
+    }
+
+    const payload = config.textValue.trim();
+    if (!payload) {
+      return this.getWorkspaceState();
+    }
+
+    this.fanOutMessage(input.runnerId, payload);
+
+    if (config.clearAfterSend) {
+      this.stateStore.updateTextNode({ runnerId: input.runnerId, textValue: "" });
+    }
+
+    this.emitWorkspaceRefresh(input.runnerId);
+    return this.getWorkspaceState();
+  }
+
   approveGate(input: ApproveGateInput): WorkspaceSnapshot {
     this.stateStore.approveGate(input);
     this.approvedGates.add(input.runnerId);
@@ -389,6 +442,9 @@ export class AgentCanvasRuntime {
       this.turnDebounceTimers.delete(runnerId);
     }
     this.ptySupervisor.terminate(runnerId);
+    this.readyForQueuedInput.delete(runnerId);
+    this.captureTurnOutput.delete(runnerId);
+    this.turnOutputBuffers.delete(runnerId);
     this.stateStore.markRunnerHibernated(runnerId);
     this.stateStore.appendLifecycleMessage(runnerId, lifecycleBanner("Runner hibernated. Buffer preserved."));
     return this.getWorkspaceState();
@@ -401,6 +457,9 @@ export class AgentCanvasRuntime {
       this.discoveryTimers.delete(runnerId);
     }
     this.ptySupervisor.terminate(runnerId);
+    this.readyForQueuedInput.delete(runnerId);
+    this.captureTurnOutput.delete(runnerId);
+    this.turnOutputBuffers.delete(runnerId);
     this.stateStore.markRunnerExited(runnerId);
     return this.getWorkspaceState();
   }
@@ -408,6 +467,133 @@ export class AgentCanvasRuntime {
   removeRunner(runnerId: string): WorkspaceSnapshot {
     this.cleanupRunnerArtifacts(runnerId);
     return this.getWorkspaceState();
+  }
+
+  private fanOutMessage(sourceRunnerId: string, payload: string): void {
+    const normalized = payload.trim();
+    if (!normalized) {
+      return;
+    }
+
+    const edges = this.stateStore.getOutboundMessageEdges(sourceRunnerId);
+    if (edges.length === 0) {
+      return;
+    }
+
+    for (const edge of edges) {
+      this.stateStore.enqueueMessage(sourceRunnerId, edge.targetRunnerId, normalized);
+    }
+
+    this.emitWorkspaceRefresh(sourceRunnerId);
+
+    for (const edge of edges) {
+      this.tryDrainPendingMessages(edge.targetRunnerId);
+    }
+  }
+
+  private tryDrainPendingMessages(targetRunnerId: string): void {
+    const helper = this.stateStore.getHelperNodeConfig(targetRunnerId);
+    if (helper?.helperKind === "text_node") {
+      while (true) {
+        const nextMessage = this.stateStore.peekNextPendingMessage(targetRunnerId);
+        if (!nextMessage) {
+          break;
+        }
+        this.handlePendingTextDelivery(nextMessage);
+      }
+      return;
+    }
+
+    this.tryDispatchQueuedMessageToRunner(targetRunnerId);
+  }
+
+  private handlePendingTextDelivery(message: { id: string; source_runner_id: string; target_runner_id: string; payload_text: string }): void {
+    const config = this.stateStore.getTextNodeConfig(message.target_runner_id);
+    if (!config) {
+      this.stateStore.markMessageDelivered(message.id);
+      this.emitWorkspaceRefresh(message.target_runner_id);
+      return;
+    }
+
+    const nextText = config.textValue ? `${config.textValue}\n\n${message.payload_text}` : message.payload_text;
+    this.stateStore.updateTextNode({
+      runnerId: message.target_runner_id,
+      textValue: nextText
+    });
+    this.stateStore.markMessageDelivered(message.id);
+
+    const outgoingEdges = this.stateStore.getOutboundMessageEdges(message.target_runner_id);
+    if (config.autoRelayIncoming && outgoingEdges.length > 0) {
+      this.fanOutMessage(message.target_runner_id, message.payload_text);
+      if (config.clearAfterSend) {
+        this.stateStore.updateTextNode({ runnerId: message.target_runner_id, textValue: "" });
+      }
+    }
+
+    this.emitWorkspaceRefresh(message.target_runner_id);
+  }
+
+  private tryDispatchQueuedMessageToRunner(targetRunnerId: string): void {
+    const runner = this.stateStore.getRunner(targetRunnerId);
+    if (!runner || runner.agentKind === "helper" || runner.status !== "running") {
+      return;
+    }
+
+    if (this.captureTurnOutput.has(targetRunnerId)) {
+      return;
+    }
+
+    if (!this.readyForQueuedInput.has(targetRunnerId) && this.hasEmittedOutput.has(targetRunnerId)) {
+      return;
+    }
+
+    const message = this.stateStore.peekNextPendingMessage(targetRunnerId);
+    if (!message) {
+      return;
+    }
+
+    const normalizedPayload = message.payload_text.replace(/\r?\n/g, "\r");
+    const payload = normalizedPayload.endsWith("\r") ? normalizedPayload : `${normalizedPayload}\r`;
+    const banner = lifecycleBanner(`Auto-dispatched queued message from ${message.source_runner_id.slice(0, 8)}.`);
+    this.stateStore.appendLifecycleMessage(targetRunnerId, banner);
+    this.eventSink.emitRunnerOutput({
+      runnerId: targetRunnerId,
+      data: banner
+    });
+    this.startCapturingTurnOutput(targetRunnerId);
+    this.ptySupervisor.write(targetRunnerId, payload);
+    this.stateStore.handleRunnerInputSent(targetRunnerId);
+    this.stateStore.markMessageDelivered(message.id);
+    this.emitWorkspaceRefresh(targetRunnerId);
+  }
+
+  private startCapturingTurnOutput(runnerId: string): void {
+    this.captureTurnOutput.add(runnerId);
+    this.readyForQueuedInput.delete(runnerId);
+    this.turnOutputBuffers.set(runnerId, "");
+  }
+
+  private completeRunnerTurn(runnerId: string): void {
+    const payload = sanitizeTerminalText(this.turnOutputBuffers.get(runnerId) ?? "").trim();
+    this.captureTurnOutput.delete(runnerId);
+    this.turnOutputBuffers.delete(runnerId);
+    this.readyForQueuedInput.add(runnerId);
+
+    if (payload) {
+      this.fanOutMessage(runnerId, payload);
+    }
+
+    this.tryDispatchQueuedMessageToRunner(runnerId);
+    this.emitWorkspaceRefresh(runnerId);
+  }
+
+  private emitWorkspaceRefresh(runnerId: string): void {
+    const runner = this.stateStore.getRunner(runnerId);
+    if (!runner) {
+      return;
+    }
+
+    this.eventSink.emitRunnerUpdated({ runner });
   }
 
   private withRepositoryState(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
@@ -444,6 +630,9 @@ export class AgentCanvasRuntime {
       this.artifactWatchers.delete(runnerId);
     }
     this.hasEmittedOutput.delete(runnerId);
+    this.readyForQueuedInput.delete(runnerId);
+    this.captureTurnOutput.delete(runnerId);
+    this.turnOutputBuffers.delete(runnerId);
     // Remove DB records
     this.stateStore.deleteRunnerPanel(runnerId);
   }
@@ -491,6 +680,11 @@ export class AgentCanvasRuntime {
           data
         });
 
+        if (this.captureTurnOutput.has(runnerId)) {
+          const current = this.turnOutputBuffers.get(runnerId) ?? "";
+          this.turnOutputBuffers.set(runnerId, `${current}${data}`);
+        }
+
         // Track that this runner has produced at least one output chunk.
         this.hasEmittedOutput.add(runnerId);
 
@@ -500,18 +694,25 @@ export class AgentCanvasRuntime {
         const idleTimer = setTimeout(() => {
           if (!this.isShuttingDown) {
             this.stateStore.handleRunnerOutputIdle(runnerId);
+            if (this.captureTurnOutput.has(runnerId)) {
+              this.completeRunnerTurn(runnerId);
+            } else {
+              this.readyForQueuedInput.add(runnerId);
+              this.tryDispatchQueuedMessageToRunner(runnerId);
+            }
           }
           this.idleTimers.delete(runnerId);
         }, 5000);
         this.idleTimers.set(runnerId, idleTimer);
 
-        // turn_complete: debounced 200 ms after prompt sentinel detected.
-        if (this.hasEmittedOutput.has(runnerId) && AgentCanvasRuntime.PROMPT_SENTINEL.test(data)) {
+        // turn_complete: debounced 200 ms after a prompt-like terminal tail is detected.
+        if (this.hasEmittedOutput.has(runnerId) && looksLikePrompt(data)) {
           const existingTurn = this.turnDebounceTimers.get(runnerId);
           if (existingTurn) clearTimeout(existingTurn);
           const turnTimer = setTimeout(() => {
             if (!this.isShuttingDown) {
               this.stateStore.handleRunnerTurnComplete(runnerId);
+              this.completeRunnerTurn(runnerId);
             }
             this.turnDebounceTimers.delete(runnerId);
           }, 200);
@@ -529,6 +730,9 @@ export class AgentCanvasRuntime {
         const turnTimer = this.turnDebounceTimers.get(runnerId);
         if (turnTimer) { clearTimeout(turnTimer); this.turnDebounceTimers.delete(runnerId); }
         this.hasEmittedOutput.delete(runnerId);
+        this.readyForQueuedInput.delete(runnerId);
+        this.captureTurnOutput.delete(runnerId);
+        this.turnOutputBuffers.delete(runnerId);
 
         this.stateStore.markRunnerExited(runnerId);
         this.stateStore.handleRunnerProcessExit(runnerId, exitCode);

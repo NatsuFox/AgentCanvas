@@ -5,6 +5,7 @@ export const IPC_CHANNELS = {
   runnerSealCheckpoint: "runner:sealCheckpoint",
   panelUpdateGeometry: "panel:updateGeometry",
   workflowCreateEdge: "workflow:createEdge",
+  messageEdgeCreate: "messageEdge:create",
   workflowMarkComplete: "workflow:markComplete",
   workflowResetAll: "workflow:resetAll",
   workflowResetFromRunner: "workflow:resetFromRunner",
@@ -21,13 +22,21 @@ export const IPC_CHANNELS = {
   profileUpdate: "profile:update",
   profileDelete: "profile:delete",
   helperNodeCreate: "helperNode:create",
+  textNodeUpdate: "textNode:update",
+  textNodeDispatch: "textNode:dispatch",
   gateApprove: "gate:approve"
 } as const;
 
 export type RunnerStatus = "starting" | "running" | "hibernated" | "exited";
 export type CheckpointStatus = "sealed" | "archived";
 export type AgentKind = "shell" | "codex" | "claude" | "helper";
-export type HelperNodeKind = "signal_router" | "approval_gate" | "artifact_watcher" | "review_diff" | "browser_preview";
+export type HelperNodeKind =
+  | "text_node"
+  | "signal_router"
+  | "approval_gate"
+  | "artifact_watcher"
+  | "review_diff"
+  | "browser_preview";
 export type BranchMode = "fork_both" | "fork_conversation" | "fork_workspace" | "fresh_session";
 export type WorkflowRunnerState = "waiting" | "ready" | "running" | "completed" | "failed" | "skipped";
 export type WorkflowSignalType =
@@ -119,17 +128,11 @@ export interface AgentCapability {
   label: string;
   available: boolean;
   version: string | null;
-  /** Agent can resume a prior session by session ID */
   nativeResume: boolean;
-  /** Agent can fork a session by session ID */
   nativeFork: boolean;
-  /** Hook event names the agent emits natively (e.g. "turn_complete", "session_linked") */
   nativeHooks: readonly string[];
-  /** Agent can spawn and coordinate child sub-agents */
   subagentSupport: boolean;
-  /** MCP server configuration is visible and controllable for this agent */
   mcpVisibility: boolean;
-  /** Permission / approval prompts are surfaced and interceptable */
   approvalVisibility: boolean;
   notes: string | null;
 }
@@ -205,6 +208,14 @@ export interface DependencyEdgeRecord {
   createdAt: string;
 }
 
+export interface MessageEdgeRecord {
+  id: string;
+  sourceRunnerId: string;
+  targetRunnerId: string;
+  pendingCount: number;
+  createdAt: string;
+}
+
 export interface AgentProfileRecord {
   id: string;
   name: string;
@@ -267,6 +278,12 @@ export interface WorkflowSummaryRecord {
   failedCount: number;
 }
 
+export interface TextNodeConfig {
+  textValue: string;
+  clearAfterSend: boolean;
+  autoRelayIncoming: boolean;
+}
+
 export interface HelperNodeRecord {
   runnerId: string;
   helperKind: HelperNodeKind;
@@ -282,6 +299,22 @@ export interface CreateHelperNodeInput {
   y?: number;
 }
 
+export interface CreateMessageEdgeInput {
+  sourceRunnerId: string;
+  targetRunnerId: string;
+}
+
+export interface UpdateTextNodeInput {
+  runnerId: string;
+  textValue?: string;
+  clearAfterSend?: boolean;
+  autoRelayIncoming?: boolean;
+}
+
+export interface DispatchTextNodeInput {
+  runnerId: string;
+}
+
 export interface ApproveGateInput {
   runnerId: string;
 }
@@ -293,6 +326,7 @@ export interface WorkspaceSnapshot {
   panels: WorkspacePanelSnapshot[];
   checkpoints: CheckpointRecord[];
   dependencyEdges: DependencyEdgeRecord[];
+  messageEdges: MessageEdgeRecord[];
   workflows: WorkflowSummaryRecord[];
   workflowRuns: WorkflowRunRecord[];
   signalLedger: SignalLedgerEntry[];
@@ -387,6 +421,7 @@ export interface AgentCanvasApi {
   sealRunnerCheckpoint: (input: SealRunnerCheckpointInput) => Promise<WorkspaceSnapshot>;
   updatePanelGeometry: (input: UpdatePanelGeometryInput) => Promise<void>;
   createDependencyEdge: (input: CreateDependencyEdgeInput) => Promise<WorkspaceSnapshot>;
+  createMessageEdge: (input: CreateMessageEdgeInput) => Promise<WorkspaceSnapshot>;
   markRunnerComplete: (input: MarkRunnerCompleteInput) => Promise<WorkspaceSnapshot>;
   resetAllWorkflows: (input?: ResetAllWorkflowsInput) => Promise<WorkspaceSnapshot>;
   resetWorkflowFromRunner: (input: ResetWorkflowFromRunnerInput) => Promise<WorkspaceSnapshot>;
@@ -400,6 +435,8 @@ export interface AgentCanvasApi {
   updateAgentProfile: (input: UpdateAgentProfileInput) => Promise<WorkspaceSnapshot>;
   deleteAgentProfile: (profileId: string) => Promise<WorkspaceSnapshot>;
   createHelperNode: (input: CreateHelperNodeInput) => Promise<WorkspaceSnapshot>;
+  updateTextNode: (input: UpdateTextNodeInput) => Promise<WorkspaceSnapshot>;
+  dispatchTextNode: (input: DispatchTextNodeInput) => Promise<WorkspaceSnapshot>;
   approveGate: (input: ApproveGateInput) => Promise<WorkspaceSnapshot>;
   onRunnerOutput: (listener: (event: RunnerOutputEvent) => void) => () => void;
   onRunnerUpdated: (listener: (event: RunnerUpdatedEvent) => void) => () => void;

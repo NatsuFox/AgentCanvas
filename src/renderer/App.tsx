@@ -31,14 +31,17 @@ import type {
 } from "@shared/ipc";
 
 import { TerminalPanel } from "./components/TerminalPanel";
+import { TextPanel } from "./components/TextPanel";
 import { getAgentCanvasApi, getAgentCanvasRuntimeMode } from "./lib/agent-canvas-api";
 
 const agentCanvas = getAgentCanvasApi();
 
 const DEFAULT_PANEL_WIDTH = 960;
 const DEFAULT_PANEL_HEIGHT = 560;
-const MIN_PANEL_WIDTH = 420;
-const MIN_PANEL_HEIGHT = 260;
+const MIN_PANEL_WIDTH = 220;
+const MIN_PANEL_HEIGHT = 160;
+const MIN_HELPER_PANEL_WIDTH = 240;
+const MIN_HELPER_PANEL_HEIGHT = 160;
 const MINIMIZED_NODE_SIZE = 92;
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 4.2;
@@ -49,6 +52,7 @@ const MAX_SIDEBAR_WIDTH = 420;
 
 type PrimaryView = "workspace" | "sessionTree";
 type PanelFrame = Pick<WorkspacePanelRecord, "x" | "y" | "width" | "height">;
+type ResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 interface SessionTreeNode {
   checkpoint: CheckpointRecord;
@@ -58,6 +62,12 @@ interface SessionTreeNode {
 interface PendingEdgeSelection {
   sourceRunnerId: string;
   targetRunnerId: string;
+}
+
+interface MessageDragState {
+  sourceRunnerId: string;
+  x: number;
+  y: number;
 }
 
 function updatePanel(
@@ -105,6 +115,45 @@ function clampPanelFrame(frame: PanelFrame): PanelFrame {
     y: clampCanvasCoordinate(frame.y),
     width: Math.max(MIN_PANEL_WIDTH, frame.width),
     height: Math.max(MIN_PANEL_HEIGHT, frame.height)
+  };
+}
+
+function getResizedFrame(
+  direction: ResizeDirection,
+  origin: PanelFrame,
+  deltaX: number,
+  deltaY: number,
+  minWidth: number,
+  minHeight: number
+): PanelFrame {
+  let nextX = origin.x;
+  let nextY = origin.y;
+  let nextWidth = origin.width;
+  let nextHeight = origin.height;
+
+  if (direction.includes("e")) {
+    nextWidth = Math.max(minWidth, origin.width + deltaX);
+  }
+
+  if (direction.includes("s")) {
+    nextHeight = Math.max(minHeight, origin.height + deltaY);
+  }
+
+  if (direction.includes("w")) {
+    nextWidth = Math.max(minWidth, origin.width - deltaX);
+    nextX = origin.x + (origin.width - nextWidth);
+  }
+
+  if (direction.includes("n")) {
+    nextHeight = Math.max(minHeight, origin.height - deltaY);
+    nextY = origin.y + (origin.height - nextHeight);
+  }
+
+  return {
+    x: nextX,
+    y: nextY,
+    width: nextWidth,
+    height: nextHeight
   };
 }
 
@@ -212,6 +261,7 @@ export default function App(): JSX.Element {
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState("");
   const [creatingHelper, setCreatingHelper] = useState(false);
+  const [messageDrag, setMessageDrag] = useState<MessageDragState | null>(null);
   const runtimeMode = getAgentCanvasRuntimeMode();
   const workspaceRef = useRef<WorkspaceSnapshot | null>(null);
   const workspaceStageRef = useRef<HTMLElement | null>(null);
@@ -409,24 +459,8 @@ export default function App(): JSX.Element {
       });
     });
 
-    const unsubscribeUpdated = agentCanvas.onRunnerUpdated((event) => {
-      if (!hasRunner(workspaceRef.current, event.runner.id)) {
-        void refreshWorkspace();
-        return;
-      }
-
-      startTransition(() => {
-        setWorkspace((currentWorkspace) => {
-          if (!currentWorkspace) {
-            return currentWorkspace;
-          }
-
-          return updatePanel(currentWorkspace, event.runner.id, (panel) => ({
-            ...panel,
-            runner: event.runner
-          }));
-        });
-      });
+    const unsubscribeUpdated = agentCanvas.onRunnerUpdated(() => {
+      void refreshWorkspace();
     });
 
     return () => {
@@ -490,6 +524,28 @@ export default function App(): JSX.Element {
     }
     return map;
   }, [workspace?.workspaceResources]);
+  const helperByRunnerId = useMemo(
+    () => new Map((workspace?.helperNodes ?? []).map((helper) => [helper.runnerId, helper])),
+    [workspace?.helperNodes]
+  );
+  const inboundMessageEdgeByTarget = useMemo(
+    () => new Map((workspace?.messageEdges ?? []).map((edge) => [edge.targetRunnerId, edge])),
+    [workspace?.messageEdges]
+  );
+  const pendingInboundCountByRunner = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const edge of workspace?.messageEdges ?? []) {
+      counts.set(edge.targetRunnerId, (counts.get(edge.targetRunnerId) ?? 0) + edge.pendingCount);
+    }
+    return counts;
+  }, [workspace?.messageEdges]);
+  const pendingOutboundCountByRunner = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const edge of workspace?.messageEdges ?? []) {
+      counts.set(edge.sourceRunnerId, (counts.get(edge.sourceRunnerId) ?? 0) + edge.pendingCount);
+    }
+    return counts;
+  }, [workspace?.messageEdges]);
 
   const activePanelId = useMemo(() => {
     if (maximizedPanelId && visiblePanels.some((panel) => panel.panel.id === maximizedPanelId)) {
@@ -499,13 +555,17 @@ export default function App(): JSX.Element {
     const activePanel = [...visiblePanels].sort((left, right) => right.panel.zIndex - left.panel.zIndex)[0] ?? null;
     return activePanel?.panel.id ?? null;
   }, [maximizedPanelId, visiblePanels]);
+  const messageDropTargetRunnerId = useMemo(
+    () => (messageDrag ? findMessageTargetRunnerId({ x: messageDrag.x, y: messageDrag.y }, messageDrag.sourceRunnerId) : null),
+    [messageDrag, floatingPanels, inboundMessageEdgeByTarget, helperByRunnerId, viewport.scale]
+  );
 
   const panelSummary = useMemo(() => {
     if (visiblePanels.length === 0) {
-      return "No live terminals";
+      return "No live nodes";
     }
 
-    return `${visiblePanels.length} terminal panel${visiblePanels.length === 1 ? "" : "s"}`;
+    return `${visiblePanels.length} live panel${visiblePanels.length === 1 ? "" : "s"}`;
   }, [visiblePanels]);
 
   const repositorySummary = useMemo(() => {
@@ -523,6 +583,115 @@ export default function App(): JSX.Element {
     }),
     [assetPaletteCollapsed, checkpointSidebarCollapsed, leftSidebarWidth, rightSidebarWidth]
   );
+
+  function isTextNodeHelper(helperNode: HelperNodeRecord | null | undefined): boolean {
+    return helperNode?.helperKind === "text_node";
+  }
+
+  function isMessageConnectablePanel(panel: WorkspacePanelSnapshot): boolean {
+    if (panel.runner.agentKind !== "helper") {
+      return true;
+    }
+
+    return isTextNodeHelper(helperByRunnerId.get(panel.runner.id) ?? null);
+  }
+
+  function getCanvasWorldPoint(clientX: number, clientY: number): { x: number; y: number } | null {
+    if (!workspaceStageRef.current) {
+      return null;
+    }
+
+    const rect = workspaceStageRef.current.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - viewport.offsetX) / viewport.scale,
+      y: (clientY - rect.top - viewport.offsetY) / viewport.scale
+    };
+  }
+
+  function getMessageInputAnchor(panel: WorkspacePanelSnapshot): { x: number; y: number } {
+    const bounds = getPanelVisualBounds(panel);
+    return {
+      x: bounds.x - 14,
+      y: bounds.y + bounds.height / 2
+    };
+  }
+
+  function getMessageOutputAnchor(panel: WorkspacePanelSnapshot): { x: number; y: number } {
+    const bounds = getPanelVisualBounds(panel);
+    return {
+      x: bounds.x + bounds.width + 14,
+      y: bounds.y + bounds.height / 2
+    };
+  }
+
+  function findMessageTargetRunnerId(point: { x: number; y: number }, sourceRunnerId: string): string | null {
+    let bestTargetId: string | null = null;
+    let bestDistance = Infinity;
+    const maxDistance = 36 / viewport.scale;
+
+    for (const panel of floatingPanels) {
+      if (!isMessageConnectablePanel(panel) || panel.runner.id === sourceRunnerId) {
+        continue;
+      }
+
+      if (inboundMessageEdgeByTarget.has(panel.runner.id)) {
+        continue;
+      }
+
+      const anchor = getMessageInputAnchor(panel);
+      const distance = Math.hypot(anchor.x - point.x, anchor.y - point.y);
+      if (distance <= maxDistance && distance < bestDistance) {
+        bestDistance = distance;
+        bestTargetId = panel.runner.id;
+      }
+    }
+
+    return bestTargetId;
+  }
+
+  function handleStartMessageConnection(sourceRunnerId: string, event: ReactPointerEvent<HTMLElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startPoint = getCanvasWorldPoint(event.clientX, event.clientY);
+    if (!startPoint) {
+      return;
+    }
+
+    setMessageDrag({
+      sourceRunnerId,
+      x: startPoint.x,
+      y: startPoint.y
+    });
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      const point = getCanvasWorldPoint(pointerEvent.clientX, pointerEvent.clientY);
+      if (!point) {
+        return;
+      }
+
+      setMessageDrag({
+        sourceRunnerId,
+        x: point.x,
+        y: point.y
+      });
+    };
+
+    const handlePointerUp = (pointerEvent: PointerEvent) => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      const point = getCanvasWorldPoint(pointerEvent.clientX, pointerEvent.clientY);
+      const targetRunnerId = point ? findMessageTargetRunnerId(point, sourceRunnerId) : null;
+      setMessageDrag(null);
+
+      if (targetRunnerId) {
+        void handleCreateMessageEdge(sourceRunnerId, targetRunnerId);
+      }
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
 
   function dismissPanelLocally(panelId: string | null): void {
     if (!panelId) {
@@ -798,6 +967,47 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function handleCreateMessageEdge(sourceRunnerId: string, targetRunnerId: string): Promise<void> {
+    setError(null);
+
+    try {
+      const snapshot = await agentCanvas.createMessageEdge({
+        sourceRunnerId,
+        targetRunnerId
+      });
+      applyWorkspaceSnapshot(snapshot);
+    } catch (edgeError: unknown) {
+      setError(edgeError instanceof Error ? edgeError.message : "Failed to create message edge.");
+    }
+  }
+
+  async function handleUpdateTextNode(runnerId: string, textValue: string): Promise<void> {
+    try {
+      const snapshot = await agentCanvas.updateTextNode({ runnerId, textValue });
+      applyWorkspaceSnapshot(snapshot);
+    } catch (textError: unknown) {
+      setError(textError instanceof Error ? textError.message : "Failed to update Text node.");
+    }
+  }
+
+  async function handleSetTextNodeClearAfterSend(runnerId: string, clearAfterSend: boolean): Promise<void> {
+    try {
+      const snapshot = await agentCanvas.updateTextNode({ runnerId, clearAfterSend });
+      applyWorkspaceSnapshot(snapshot);
+    } catch (textError: unknown) {
+      setError(textError instanceof Error ? textError.message : "Failed to update Text node options.");
+    }
+  }
+
+  async function handleDispatchTextNode(runnerId: string): Promise<void> {
+    try {
+      const snapshot = await agentCanvas.dispatchTextNode({ runnerId });
+      applyWorkspaceSnapshot(snapshot);
+    } catch (textError: unknown) {
+      setError(textError instanceof Error ? textError.message : "Failed to dispatch Text node.");
+    }
+  }
+
   async function handleApproveGate(runnerId: string): Promise<void> {
     try {
       const snapshot = await agentCanvas.approveGate({ runnerId } as ApproveGateInput);
@@ -919,7 +1129,7 @@ export default function App(): JSX.Element {
     }
 
     const target = event.target as HTMLElement;
-    if (target.closest(".terminal-panel, .minimized-node, .workspace-hud, .sidebar-resizer, button")) {
+    if (target.closest(".terminal-panel, .text-panel, .helper-panel, .minimized-node, .workspace-hud, .sidebar-resizer, button")) {
       return;
     }
 
@@ -964,7 +1174,7 @@ export default function App(): JSX.Element {
   function handleWorkspaceWheel(event: ReactWheelEvent<HTMLElement>): void {
     const target = event.target as HTMLElement;
 
-    if (target.closest(".terminal-panel, .minimized-node")) {
+    if (target.closest(".terminal-panel, .text-panel, .helper-panel, .minimized-node")) {
       return;
     }
 
@@ -1246,6 +1456,55 @@ export default function App(): JSX.Element {
             >
               <div className="workspace-grid workspace-grid-minor" />
               <div className="workspace-grid workspace-grid-major" />
+              <svg className="message-edge-layer" aria-hidden="true">
+                {workspace?.messageEdges.map((edge) => {
+                  const source = panelByRunnerId.get(edge.sourceRunnerId);
+                  const target = panelByRunnerId.get(edge.targetRunnerId);
+
+                  if (!source || !target) {
+                    return null;
+                  }
+
+                  const start = getMessageOutputAnchor(source);
+                  const end = getMessageInputAnchor(target);
+                  const curve = Math.max(64, Math.abs(end.x - start.x) * 0.35);
+
+                  return (
+                    <g key={edge.id}>
+                      <path
+                        className={`message-edge-path${edge.pendingCount > 0 ? " message-edge-path-active" : ""}`}
+                        d={`M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`}
+                      />
+                      {edge.pendingCount > 0 ? (
+                        <g>
+                          <circle className="message-edge-badge" cx={(start.x + end.x) / 2} cy={(start.y + end.y) / 2 - 10} r="11" />
+                          <text className="message-edge-badge-label" x={(start.x + end.x) / 2} y={(start.y + end.y) / 2 - 6}>
+                            {edge.pendingCount}
+                          </text>
+                        </g>
+                      ) : null}
+                    </g>
+                  );
+                })}
+                {messageDrag ? (() => {
+                  const source = panelByRunnerId.get(messageDrag.sourceRunnerId);
+                  if (!source) {
+                    return null;
+                  }
+
+                  const start = getMessageOutputAnchor(source);
+                  const targetPanel = messageDropTargetRunnerId ? panelByRunnerId.get(messageDropTargetRunnerId) ?? null : null;
+                  const end = targetPanel ? getMessageInputAnchor(targetPanel) : { x: messageDrag.x, y: messageDrag.y };
+                  const curve = Math.max(64, Math.abs(end.x - start.x) * 0.35);
+
+                  return (
+                    <path
+                      className="message-edge-draft"
+                      d={`M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`}
+                    />
+                  );
+                })() : null}
+              </svg>
               <svg className="workflow-edge-layer" aria-hidden="true">
                 {workspace?.dependencyEdges.map((edge) => {
                   const source = panelByRunnerId.get(edge.sourceRunnerId);
@@ -1280,18 +1539,50 @@ export default function App(): JSX.Element {
                   );
                 })}
               </svg>
-              {floatingPanels.map((panel) => (
-                <>
-                  {panel.runner.agentKind === "helper" ? (
+              {floatingPanels.map((panel) => {
+                const helperNode = helperByRunnerId.get(panel.runner.id) ?? null;
+
+                if (isTextNodeHelper(helperNode)) {
+                  return (
+                    <TextPanel
+                      key={panel.panel.id}
+                      panel={panel}
+                      textConfig={(helperNode?.configJson ?? {}) as any}
+                      viewportScale={viewport.scale}
+                      renderMode="floating"
+                      pendingInboundCount={pendingInboundCountByRunner.get(panel.runner.id) ?? 0}
+                      pendingOutboundCount={pendingOutboundCountByRunner.get(panel.runner.id) ?? 0}
+                      isActive={panel.panel.id === activePanelId}
+                      onActivate={() => handleActivatePanel(panel.panel.id)}
+                      onFrameChange={(frame) => handlePanelFrameChange(panel.panel.id, frame)}
+                      onFrameCommit={(frame) => void handlePanelFrameCommit(panel.panel.id, frame)}
+                      onTextChange={(textValue) => void handleUpdateTextNode(panel.runner.id, textValue)}
+                      onSetClearAfterSend={(clearAfterSend) => void handleSetTextNodeClearAfterSend(panel.runner.id, clearAfterSend)}
+                      onDispatch={() => void handleDispatchTextNode(panel.runner.id)}
+                      onCloseWindow={() => void handleRemoveRunner(panel.runner.id)}
+                    />
+                  );
+                }
+
+                if (panel.runner.agentKind === "helper") {
+                  return (
                     <HelperPanel
                       key={panel.panel.id}
                       panel={panel}
-                      helperNode={workspace?.helperNodes.find((h) => h.runnerId === panel.runner.id) ?? null}
+                      helperNode={helperNode}
+                      viewportScale={viewport.scale}
+                      isActive={panel.panel.id === activePanelId}
+                      onActivate={() => handleActivatePanel(panel.panel.id)}
+                      onFrameChange={(frame) => handlePanelFrameChange(panel.panel.id, frame)}
+                      onFrameCommit={(frame) => void handlePanelFrameCommit(panel.panel.id, frame)}
                       onApproveGate={() => void handleApproveGate(panel.runner.id)}
                       onClose={() => void handleRemoveRunner(panel.runner.id)}
                     />
-                  ) : (
-                    <>
+                  );
+                }
+
+                return (
+                  <>
                     <TerminalPanel
                       key={panel.panel.id}
                       panel={panel}
@@ -1335,53 +1626,103 @@ export default function App(): JSX.Element {
                         resource={resourceByRunnerId.get(panel.runner.id) ?? null}
                       />
                     ) : null}
-                    </>
-                  )}
-                </>
-              ))}
+                  </>
+                );
+              })}
+              <div className="message-port-layer">
+                {floatingPanels.filter((panel) => isMessageConnectablePanel(panel)).map((panel) => {
+                  const inputAnchor = getMessageInputAnchor(panel);
+                  const outputAnchor = getMessageOutputAnchor(panel);
+                  const isInvalidTarget = Boolean(inboundMessageEdgeByTarget.get(panel.runner.id));
+                  const isDropTarget = messageDropTargetRunnerId === panel.runner.id;
+
+                  return (
+                    <div key={`message-port-${panel.runner.id}`}>
+                      <button
+                        type="button"
+                        className={`message-port-button message-port-button-input${isInvalidTarget ? " message-port-invalid" : ""}${isDropTarget ? " message-port-target" : ""}`}
+                        style={{ left: `${inputAnchor.x}px`, top: `${inputAnchor.y}px` }}
+                        tabIndex={-1}
+                        aria-label={`Input port for ${panel.runner.title ?? panel.runner.id.slice(0, 6)}`}
+                        title={isInvalidTarget ? "This node already has an upstream link" : "Input port"}
+                      />
+                      <button
+                        type="button"
+                        className={`message-port-button message-port-button-output${messageDrag?.sourceRunnerId === panel.runner.id ? " message-port-source" : ""}`}
+                        style={{ left: `${outputAnchor.x}px`, top: `${outputAnchor.y}px` }}
+                        onPointerDown={(event) => handleStartMessageConnection(panel.runner.id, event)}
+                        aria-label={`Start link from ${panel.runner.title ?? panel.runner.id.slice(0, 6)}`}
+                        title="Drag to another node to create a message link"
+                      >
+                        <span className="message-port-button-core" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             {maximizedPanel ? (
               <div className="workspace-focus-layer">
-                <TerminalPanel
-                  panel={maximizedPanel}
-                  canSeal={Boolean(workspace?.repository) && !maximizedPanel.runner.sealedNodeId}
-                  sealing={sealingRunnerId === maximizedPanel.runner.id}
-                  linking={linkingSourceRunnerId === maximizedPanel.runner.id}
-                  canConnectTarget={linkingSourceRunnerId !== null && linkingSourceRunnerId !== maximizedPanel.runner.id}
-                  canResetWorkflow={maximizedPanel.runner.workflowState !== null}
-                  viewportScale={viewport.scale}
-                  renderMode="maximized"
-                  isActive
-                  onActivate={() => handleActivatePanel(maximizedPanel.panel.id)}
-                  onFrameChange={() => undefined}
-                  onFrameCommit={() => undefined}
-                  onToggleMinimize={() => void handleSetPanelCollapsed(maximizedPanel.panel.id, true)}
-                  onRestoreWindow={() => void handleSetPanelCollapsed(maximizedPanel.panel.id, false)}
-                  onToggleMaximize={() => void handleTogglePanelMaximize(maximizedPanel.panel.id)}
-                  onBeginLink={() => setLinkingSourceRunnerId(maximizedPanel.runner.id)}
-                  onConnectTarget={() =>
-                    linkingSourceRunnerId
-                      ? setPendingEdgeSelection({
-                          sourceRunnerId: linkingSourceRunnerId,
-                          targetRunnerId: maximizedPanel.runner.id
-                        })
-                      : undefined
-                  }
-                  onMarkComplete={() => void handleMarkRunnerComplete(maximizedPanel.runner.id)}
-                  onResetWorkflow={() => void handleResetWorkflowFromRunner(maximizedPanel.runner.id)}
-                  onInput={(data) => agentCanvas.writeToRunner({ runnerId: maximizedPanel.runner.id, data })}
-                  onTerminalResize={(cols, rows) => agentCanvas.resizeRunner({ runnerId: maximizedPanel.runner.id, cols, rows })}
-                  onHibernate={() => void handleHibernateRunner(maximizedPanel.runner.id)}
-                  onRelaunch={() => void handleRelaunchRunner(maximizedPanel.runner.id)}
-                  onSeal={() => void handleSealRunner(maximizedPanel.runner.id)}
-                  onTerminate={() => void handleTerminateRunner(maximizedPanel.runner.id)}
-                  onCloseWindow={() => void handleRemoveRunner(maximizedPanel.runner.id)}
-                />
+                {isTextNodeHelper(helperByRunnerId.get(maximizedPanel.runner.id) ?? null) ? (
+                  <TextPanel
+                    panel={maximizedPanel}
+                    textConfig={(helperByRunnerId.get(maximizedPanel.runner.id)?.configJson ?? {}) as any}
+                    viewportScale={viewport.scale}
+                    renderMode="maximized"
+                    pendingInboundCount={pendingInboundCountByRunner.get(maximizedPanel.runner.id) ?? 0}
+                    pendingOutboundCount={pendingOutboundCountByRunner.get(maximizedPanel.runner.id) ?? 0}
+                    isActive
+                    onActivate={() => handleActivatePanel(maximizedPanel.panel.id)}
+                    onFrameChange={() => undefined}
+                    onFrameCommit={() => undefined}
+                    onTextChange={(textValue) => void handleUpdateTextNode(maximizedPanel.runner.id, textValue)}
+                    onSetClearAfterSend={(clearAfterSend) => void handleSetTextNodeClearAfterSend(maximizedPanel.runner.id, clearAfterSend)}
+                    onDispatch={() => void handleDispatchTextNode(maximizedPanel.runner.id)}
+                    onCloseWindow={() => void handleRemoveRunner(maximizedPanel.runner.id)}
+                  />
+                ) : (
+                  <TerminalPanel
+                    panel={maximizedPanel}
+                    canSeal={Boolean(workspace?.repository) && !maximizedPanel.runner.sealedNodeId}
+                    sealing={sealingRunnerId === maximizedPanel.runner.id}
+                    linking={linkingSourceRunnerId === maximizedPanel.runner.id}
+                    canConnectTarget={linkingSourceRunnerId !== null && linkingSourceRunnerId !== maximizedPanel.runner.id}
+                    canResetWorkflow={maximizedPanel.runner.workflowState !== null}
+                    viewportScale={viewport.scale}
+                    renderMode="maximized"
+                    isActive
+                    onActivate={() => handleActivatePanel(maximizedPanel.panel.id)}
+                    onFrameChange={() => undefined}
+                    onFrameCommit={() => undefined}
+                    onToggleMinimize={() => void handleSetPanelCollapsed(maximizedPanel.panel.id, true)}
+                    onRestoreWindow={() => void handleSetPanelCollapsed(maximizedPanel.panel.id, false)}
+                    onToggleMaximize={() => void handleTogglePanelMaximize(maximizedPanel.panel.id)}
+                    onBeginLink={() => setLinkingSourceRunnerId(maximizedPanel.runner.id)}
+                    onConnectTarget={() =>
+                      linkingSourceRunnerId
+                        ? setPendingEdgeSelection({
+                            sourceRunnerId: linkingSourceRunnerId,
+                            targetRunnerId: maximizedPanel.runner.id
+                          })
+                        : undefined
+                    }
+                    onMarkComplete={() => void handleMarkRunnerComplete(maximizedPanel.runner.id)}
+                    onResetWorkflow={() => void handleResetWorkflowFromRunner(maximizedPanel.runner.id)}
+                    onInput={(data) => agentCanvas.writeToRunner({ runnerId: maximizedPanel.runner.id, data })}
+                    onTerminalResize={(cols, rows) => agentCanvas.resizeRunner({ runnerId: maximizedPanel.runner.id, cols, rows })}
+                    onHibernate={() => void handleHibernateRunner(maximizedPanel.runner.id)}
+                    onRelaunch={() => void handleRelaunchRunner(maximizedPanel.runner.id)}
+                    onSeal={() => void handleSealRunner(maximizedPanel.runner.id)}
+                    onTerminate={() => void handleTerminateRunner(maximizedPanel.runner.id)}
+                    onCloseWindow={() => void handleRemoveRunner(maximizedPanel.runner.id)}
+                  />
+                )}
               </div>
             ) : null}
 
             <div className="workspace-hud">
+              <span className="status-badge status-starting">Drag blue side handles to link nodes</span>
               {linkingSourceRunnerId ? (
                 <span className="status-badge status-running">Linking from {linkingSourceRunnerId.slice(0, 6)}</span>
               ) : null}
@@ -1497,7 +1838,7 @@ export default function App(): JSX.Element {
               </div>
               <p className="asset-palette-copy" style={{ marginTop: "1rem" }}>Helper nodes</p>
               <div className="asset-palette-list">
-                {(["signal_router", "approval_gate", "artifact_watcher", "review_diff", "browser_preview"] as HelperNodeKind[]).map((kind) => (
+                {(["text_node", "signal_router", "approval_gate", "artifact_watcher", "review_diff", "browser_preview"] as HelperNodeKind[]).map((kind) => (
                   <article key={kind} className="node-asset-card">
                     <div className="node-asset-info">
                       <strong className="node-asset-label">{kind.replace(/_/g, " ")}</strong>
@@ -1734,28 +2075,149 @@ function WorkspaceBadge({ panel, resource }: WorkspaceBadgeProps): JSX.Element |
 interface HelperPanelProps {
   panel: WorkspacePanelSnapshot;
   helperNode: HelperNodeRecord | null;
+  viewportScale: number;
+  isActive: boolean;
+  onActivate: () => void;
+  onFrameChange: (frame: PanelFrame) => void;
+  onFrameCommit: (frame: PanelFrame) => void;
   onApproveGate: () => void;
   onClose: () => void;
 }
 
-function HelperPanel({ panel, helperNode, onApproveGate, onClose }: HelperPanelProps): JSX.Element {
+function HelperPanel({
+  panel,
+  helperNode,
+  viewportScale,
+  isActive,
+  onActivate,
+  onFrameChange,
+  onFrameCommit,
+  onApproveGate,
+  onClose
+}: HelperPanelProps): JSX.Element {
   const kind = helperNode?.helperKind ?? "signal_router";
   const isGate = kind === "approval_gate";
   const isDiff = kind === "review_diff";
   const isPreview = kind === "browser_preview";
   const isApproved = helperNode?.gateApproved ?? false;
+  const frameRef = useRef<PanelFrame>({
+    x: panel.panel.x,
+    y: panel.panel.y,
+    width: panel.panel.width,
+    height: panel.panel.height
+  });
+  const onActivateRef = useRef(onActivate);
+  const onFrameChangeRef = useRef(onFrameChange);
+  const onFrameCommitRef = useRef(onFrameCommit);
+
+  useEffect(() => {
+    frameRef.current = {
+      x: panel.panel.x,
+      y: panel.panel.y,
+      width: panel.panel.width,
+      height: panel.panel.height
+    };
+  }, [panel.panel.height, panel.panel.width, panel.panel.x, panel.panel.y]);
+
+  useEffect(() => {
+    onActivateRef.current = onActivate;
+  }, [onActivate]);
+
+  useEffect(() => {
+    onFrameChangeRef.current = onFrameChange;
+  }, [onFrameChange]);
+
+  useEffect(() => {
+    onFrameCommitRef.current = onFrameCommit;
+  }, [onFrameCommit]);
+
+  function beginFrameInteraction(
+    event: ReactPointerEvent<HTMLElement>,
+    getNextFrame: (pointerEvent: PointerEvent) => PanelFrame
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    onActivateRef.current();
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      onFrameChangeRef.current(getNextFrame(pointerEvent));
+    };
+
+    const handlePointerUp = (pointerEvent: PointerEvent) => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      onFrameCommitRef.current(getNextFrame(pointerEvent));
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
+
+  function handleHeaderPointerDown(event: ReactPointerEvent<HTMLElement>): void {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) {
+      return;
+    }
+
+    const origin = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      frame: frameRef.current
+    };
+
+    beginFrameInteraction(event, (pointerEvent) => ({
+      x: origin.frame.x + (pointerEvent.clientX - origin.pointerX) / viewportScale,
+      y: origin.frame.y + (pointerEvent.clientY - origin.pointerY) / viewportScale,
+      width: origin.frame.width,
+      height: origin.frame.height
+    }));
+  }
+
+  function handleResizePointerDown(direction: ResizeDirection, event: ReactPointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const origin = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      frame: frameRef.current
+    };
+
+    beginFrameInteraction(event, (pointerEvent) =>
+      getResizedFrame(
+        direction,
+        origin.frame,
+        (pointerEvent.clientX - origin.pointerX) / viewportScale,
+        (pointerEvent.clientY - origin.pointerY) / viewportScale,
+        MIN_HELPER_PANEL_WIDTH,
+        MIN_HELPER_PANEL_HEIGHT
+      )
+    );
+  }
+
   return (
     <div
-      className="helper-panel"
+      className={`helper-panel${isActive ? " helper-panel-active" : ""}`}
       style={{
         position: "absolute",
         left: panel.panel.x,
         top: panel.panel.y,
-        width: 200,
+        width: panel.panel.width,
+        height: panel.panel.height,
         zIndex: panel.panel.zIndex
       }}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        onActivate();
+      }}
+      onWheel={(event) => event.stopPropagation()}
     >
-      <div className="helper-panel-header">
+      <div className="helper-panel-header" onPointerDown={handleHeaderPointerDown}>
         <span className="status-badge status-hibernated">{kind.replace(/_/g, " ")}</span>
         <button className="ghost-button compact-button" onClick={onClose} title="Remove helper node">×</button>
       </div>
@@ -1773,6 +2235,15 @@ function HelperPanel({ panel, helperNode, onApproveGate, onClose }: HelperPanelP
       ) : isPreview ? (
         <p className="helper-panel-id" style={{ marginTop: "0.5rem" }}>Validate runtime — attach URL or screenshot artifact</p>
       ) : null}
+      {(["n", "e", "s", "w", "ne", "nw", "se", "sw"] as ResizeDirection[]).map((direction) => (
+        <button
+          key={direction}
+          type="button"
+          className={`terminal-resize-handle terminal-resize-${direction}`}
+          aria-label={`Resize from ${direction}`}
+          onPointerDown={(event) => handleResizePointerDown(direction, event)}
+        />
+      ))}
     </div>
   );
 }
