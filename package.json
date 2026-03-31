@@ -1,0 +1,44 @@
+{
+  "name": "agentcanvas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Terminal-first spatial workspace for AI-assisted development.",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web:server": "AGENTCANVAS_WEB_API_ONLY=1 tsx src/web/server.ts",
+    "dev:web:ui": "vite --config vite.web.config.ts",
+    "dev:web": "concurrently -k -n api,ui -c auto \"npm run dev:web:server\" \"npm run dev:web:ui\"",
+    "build": "electron-vite build",
+    "build:web": "vite build --config vite.web.config.ts",
+    "serve:web": "tsx src/web/server.ts",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build && npm run build:web",
+    "docs:serve": "mkdocs serve",
+    "docs:build": "mkdocs build"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.1",
+    "electron": "^41.0.3",
+    "electron-vite": "^5.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  }
+}
