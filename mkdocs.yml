@@ -1,0 +1,81 @@
+site_name: AgentCanvas
+site_description: Terminal-first spatial workspace for AI-assisted development
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: black
+    accent: deep orange
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+nav:
+  - Home: README.md
+  - Concepts:
+    - concepts/README.md
+    - Product Vision: concepts/product-vision.md
+    - User Experience: concepts/user-experience.md
+    - Workflow Orchestration: concepts/workflow-orchestration.md
+    - Glossary: concepts/glossary.md
+  - Architecture:
+    - architecture/README.md
+    - System Overview: architecture/system-overview.md
+    - Terminal Runtime: architecture/terminal-runtime.md
+    - Agent Adapters: architecture/agent-adapters.md
+    - Workspace Isolation: architecture/workspace-isolation.md
+    - Persistence & State: architecture/persistence-and-state.md
+  - Implementation:
+    - implementation/README.md
+    - Roadmap: implementation/roadmap.md
+    - Phase 0 — Terminal Substrate: implementation/phase-0-terminal-substrate.md
+    - Agent Runtime Design: implementation/agent-runtime-design-plan.md
+    - Validation & Risks: implementation/validation-and-risks.md
+  - Research:
+    - research/README.md
+    - Reference Synthesis: research/reference-synthesis.md
+  - References:
+    - references/README.md
+    - Proposal Crosswalk: references/proposal-crosswalk.md
+    - Research Crosswalk: references/research-report-crosswalk.md
+    - Proposal v0.11: references/proposal-v0.11.md
+    - Reference Research Report: references/reference-research-report.md
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - tables
+  - footnotes
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search:
+      lang: en
